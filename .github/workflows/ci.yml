@@ -1,0 +1,170 @@
+name: Quality gates
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: mora_test
+          POSTGRES_USER: mora
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U mora -d mora_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: mora_test
+      DB_USERNAME: mora
+      DB_PASSWORD: ci-only-password
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, pdo_sqlite, intl, gd, zip, bcmath
+          coverage: none
+          tools: composer:v2
+      - run: composer install --prefer-dist --no-interaction --no-progress
+      - run: composer validate --strict
+      - run: vendor/bin/pint --test
+      - run: vendor/bin/phpstan analyse --memory-limit=1G
+      - run: php artisan test
+      - run: php artisan test tests/Integration
+      - run: composer audit --locked
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm audit --audit-level=high
+      - run: npm run build
+
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build and exercise an isolated container stack
+        run: bash scripts/smoke-containers.sh
+
+  browser:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: mora_e2e_test
+          POSTGRES_USER: mora
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U mora -d mora_e2e_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      APP_ENV: local
+      APP_DEBUG: 'false'
+      APP_KEY: base64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=
+      APP_URL: http://127.0.0.1:8000
+      FRONTEND_URL: http://127.0.0.1:3000
+      API_INTERNAL_URL: http://127.0.0.1:8000/api/v1
+      NEXT_PUBLIC_SITE_URL: http://127.0.0.1:3000
+      SANCTUM_STATEFUL_DOMAINS: 127.0.0.1:3000,127.0.0.1:8000
+      SESSION_DRIVER: database
+      SESSION_SECURE_COOKIE: 'false'
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: mora_e2e_test
+      DB_USERNAME: mora
+      DB_PASSWORD: ci-only-password
+      CACHE_STORE: database
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
+      E2E_BASE_URL: http://127.0.0.1:3000
+      E2E_ADMIN_URL: http://127.0.0.1:8000
+      E2E_ADMIN_EMAIL: browser-admin@example.test
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, intl, gd, zip, bcmath
+          coverage: none
+          tools: composer:v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: composer install --prefer-dist --no-interaction --no-progress
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Prepare isolated fixtures and verify real browser flows
+        shell: bash
+        run: |
+          set -euo pipefail
+          export E2E_ADMIN_PASSWORD="Browser-Test!$(openssl rand -hex 16)"
+          APP_ENV=testing php backend/tests/Support/prepare-browser.php --reset
+          (cd frontend && npm run build)
+          (cd backend && php artisan serve --host=127.0.0.1 --port=8000 > /tmp/mora-api.log 2>&1) &
+          api_pid=$!
+          (cd frontend && HOSTNAME=127.0.0.1 PORT=3000 npm run start > /tmp/mora-store.log 2>&1) &
+          store_pid=$!
+          trap 'kill "$api_pid" "$store_pid" 2>/dev/null || true' EXIT
+          curl --retry 30 --retry-all-errors --retry-delay 1 --fail --silent --output /dev/null http://127.0.0.1:8000/api/v1/health
+          node scripts/verify-http.mjs http://127.0.0.1:8000 --backend-only
+          curl --retry 30 --retry-all-errors --retry-delay 1 --fail --silent --output /dev/null http://127.0.0.1:3000
+          cd frontend
+          npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failures
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7

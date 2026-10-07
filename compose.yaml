@@ -1,0 +1,134 @@
+name: ${COMPOSE_PROJECT_NAME:-mora}
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+    target: app
+  restart: unless-stopped
+  environment: &app-env
+    APP_NAME: Mora
+    APP_ENV: production
+    APP_DEBUG: 'false'
+    APP_KEY: ${APP_KEY:?Set APP_KEY in the root .env}
+    APP_URL: ${APP_URL:-http://localhost:8080}
+    FRONTEND_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:8080}
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: 5432
+    DB_DATABASE: ${DB_DATABASE:-mora}
+    DB_USERNAME: ${DB_USERNAME:-mora}
+    DB_PASSWORD: ${DB_PASSWORD:?Set a strong DB_PASSWORD in the root .env}
+    SESSION_DRIVER: database
+    SESSION_ENCRYPT: 'true'
+    SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
+    SESSION_HTTP_ONLY: 'true'
+    SESSION_SAME_SITE: lax
+    SANCTUM_STATEFUL_DOMAINS: ${SANCTUM_STATEFUL_DOMAINS:-localhost:8080}
+    CACHE_STORE: database
+    QUEUE_CONNECTION: database
+    LOG_CHANNEL: stderr
+    LOG_LEVEL: info
+    MAIL_MAILER: ${MAIL_MAILER:-smtp}
+    MAIL_HOST: ${MAIL_HOST:-}
+    MAIL_PORT: ${MAIL_PORT:-587}
+    MAIL_USERNAME: ${MAIL_USERNAME:-}
+    MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+    MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-hello@example.test}
+    MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Mora}
+    STORE_SHIPPING_CENTS: ${STORE_SHIPPING_CENTS:-390}
+    STORE_FREE_SHIPPING_THRESHOLD_CENTS: ${STORE_FREE_SHIPPING_THRESHOLD_CENTS:-7500}
+  volumes:
+    - uploads:/var/www/html/storage/app/public
+  depends_on:
+    postgres:
+      condition: service_healthy
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-mora}
+      POSTGRES_USER: ${DB_USERNAME:-mora}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set a strong DB_PASSWORD in the root .env}
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    <<: *app
+    healthcheck:
+      test: ['CMD', 'php', '-r', '$$s=@fsockopen("127.0.0.1",9000); exit($$s?0:1);']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  queue:
+    <<: *app
+    command: ['php', 'artisan', 'queue:work', '--sleep=3', '--tries=3', '--max-time=3600', '--timeout=90']
+    stop_grace_period: 100s
+
+  scheduler:
+    <<: *app
+    command: ['php', 'artisan', 'schedule:work']
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:8080}
+        NEXT_PUBLIC_STORE_LIVE: ${NEXT_PUBLIC_STORE_LIVE:-false}
+        NEXT_PUBLIC_SUPPORT_EMAIL: ${NEXT_PUBLIC_SUPPORT_EMAIL:-}
+        NEXT_PUBLIC_MERCHANT_NAME: ${NEXT_PUBLIC_MERCHANT_NAME:-}
+        NEXT_PUBLIC_MERCHANT_ADDRESS: ${NEXT_PUBLIC_MERCHANT_ADDRESS:-}
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://nginx/api/v1
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:8080}
+      NEXT_PUBLIC_STORE_LIVE: ${NEXT_PUBLIC_STORE_LIVE:-false}
+      NODE_ENV: production
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:3000").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      target: nginx
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:${HTTP_PORT:-8080}:80'
+    volumes:
+      - uploads:/var/www/html/storage/app/public:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1/api/v1/health']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres:
+  uploads:

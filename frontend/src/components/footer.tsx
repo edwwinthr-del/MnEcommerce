@@ -1,0 +1,6 @@
+import Link from "next/link";
+import { ArrowUpRight } from "lucide-react";
+
+export function Footer() {
+  return <footer className="site-footer"><div className="container footer-top"><div><Link href="/" className="wordmark footer-logo">mora<span>®</span><i/></Link><p>Good things for the way you live.<br/>Thoughtfully selected for your everyday.</p><span className="footer-location">BASED IN MONTENEGRO · MADE FOR EVERYDAY</span></div><div><h2>Explore</h2><Link href="/shop">The collection</Link><Link href="/shop?new=1">New arrivals</Link><Link href="/shop?featured=1">Our favourites</Link></div><div><h2>Here to help</h2><Link href="/delivery">Delivery & returns</Link><Link href="/account">Your account</Link><Link href="/privacy">Privacy</Link><Link href="/terms">Terms of sale</Link></div><div className="footer-message"><h2>A little less ordinary.</h2><p>Discover useful things you’ll love having around.</p><Link href="/shop" className="footer-shop">Find your favourite <ArrowUpRight size={18}/></Link></div></div><div className="container footer-bottom"><span>© {new Date().getFullYear()} Mora. All rights reserved.</span><span>Montenegro · EUR €</span><span>Cash on delivery · Bank transfer</span></div></footer>;
+}
